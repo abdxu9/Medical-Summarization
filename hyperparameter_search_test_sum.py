@@ -208,6 +208,40 @@ Summary:"""
                 model_path="facebook/bart-large-cnn",
                 max_length=1024,
                 lora_target_modules=["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]
+            ),
+            ModelConfig(
+                name="openbiollm-8b",
+                model_type="decoder",
+                model_path="aaditya/Llama3-OpenBioLLM-8B",
+                max_length=8192, # Defaulting to similar as gemma-3
+                # lora_target_modules will be set by __post_init__ to default decoder modules
+                use_quantization=True # Defaulting to True as it's a decoder
+            ),
+            ModelConfig(
+                name="long-t5",
+                model_type="encoder-decoder",
+                model_path="google/long-t5-tglobal-base",
+                max_length=4096,
+                lora_target_modules=["q", "k", "v", "o", "wi", "wo"],
+                use_quantization=False
+            ),
+            ModelConfig(
+                name="led-base",
+                model_type="encoder-decoder",
+                model_path="allenai/led-base-16384",
+                max_length=8192,
+                # lora_target_modules will be set by __post_init__
+                # to default encoder-decoder modules (e.g., ["q_proj", "k_proj", ...])
+                # which are suitable for LED's BART-like architecture.
+                use_quantization=False
+            ),
+            ModelConfig(
+                name="phi-3-medium-4k",
+                model_type="decoder",
+                model_path="microsoft/Phi-3-medium-4k-instruct",
+                max_length=4096,
+                # lora_target_modules will be set by __post_init__ to default decoder modules
+                use_quantization=True
             )
         ]
         

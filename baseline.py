@@ -73,9 +73,7 @@ class EvaluationConfig:
     bert_score_model_type: str = "allenai/longformer-base-4096"
     save_examples: bool = True
     save_model_outputs: bool = True
-    num_train: int = 80  # 80% of 1000
-    num_val: int = 10    # 10% of 1000
-    num_test: int = 10   # 10% of 1000
+    
 
 class MedicalSummarizationEvaluator:
     """Main class for running baseline evaluations"""
@@ -134,46 +132,63 @@ Summary:"""
                 model_type="encoder-decoder",
                 model_path="facebook/bart-large-cnn",
                 max_length=1024
+            ),
+            ModelConfig(
+                name="openbiollm-8b",
+                model_type="decoder",
+                model_path="aaditya/Llama3-OpenBioLLM-8B",
+                use_quantization=True
+            ),
+            ModelConfig(
+                name="long-t5",
+                model_type="encoder-decoder",
+                model_path="google/long-t5-tglobal-base",
+                max_length=4096,
+                use_quantization=False
+            ),
+            ModelConfig(
+                name="led-base",
+                model_type="encoder-decoder",
+                model_path="allenai/led-base-16384",
+                max_length=4096,
+                use_quantization=False
+            ),
+            ModelConfig(
+                name="phi-3-medium-4k",
+                model_type="decoder",
+                model_path="microsoft/Phi-3-medium-4k-instruct",
+                max_length=4096,
+                use_quantization=True
             )
         ]
 
-    def load_dataset(self) -> Tuple[Dataset, Dataset, Dataset]:
-        """Load and split the MIMIC-IV-BHC dataset into train, val, test"""
+    def load_dataset(self) -> Dataset:
+        """Load the MIMIC-IV-BHC dataset for evaluation"""
         self.logger.info(f"Loading dataset from: {self.config.dataset_path}")
-        
+
         try:
             df = pd.read_csv(self.config.dataset_path)
         except Exception as e:
             self.logger.error(f"Failed to load CSV file: {e}")
             raise
-        
-        # Check if the dataframe has the expected columns
+
         expected_columns = ['input', 'target']
         if not all(col in df.columns for col in expected_columns):
+            self.logger.error(f"CSV file must contain {expected_columns} columns. Found: {df.columns}")
             raise ValueError(f"CSV file must contain {expected_columns} columns")
-        
-        # Rename columns for consistency
+
         df = df.rename(columns={'input': 'input_text', 'target': 'target_summary'})
-        
-        # Apply sample size limit if specified
+
         if self.config.sample_size and self.config.sample_size < len(df):
-            
-            df = df.sample(self.config.sample_size, random_state=self.config.random_seed)
+            df = df.sample(n=self.config.sample_size, random_state=self.config.random_seed)
             df = df.reset_index(drop=True)
-        
-        # Split into train, validation, and test sets (80/10/10)
-        train_df = df.iloc[:self.config.num_train]
-        val_df = df.iloc[self.config.num_train:self.config.num_train + self.config.num_val]
-        test_df = df.iloc[self.config.num_train + self.config.num_val:self.config.num_train + self.config.num_val + self.config.num_test]
-        
-        # Convert pandas DataFrames to Hugging Face Datasets
-        train_dataset = Dataset.from_pandas(train_df)
-        val_dataset = Dataset.from_pandas(val_df)
-        test_dataset = Dataset.from_pandas(test_df)
-        
-        self.logger.info(f"Dataset loaded and split: {len(train_dataset)} train, {len(val_dataset)} validation, {len(test_dataset)} test examples")
-        
-        return train_dataset, val_dataset, test_dataset
+        elif self.config.sample_size and self.config.sample_size >= len(df):
+            self.logger.info(f"Sample size {self.config.sample_size} is >= total records {len(df)}. Using all available records.")
+        # If sample_size is None, use all records
+
+        eval_dataset = Dataset.from_pandas(df)
+        self.logger.info(f"Dataset loaded: {len(eval_dataset)} examples for evaluation.")
+        return eval_dataset
 
     def setup_model(self, model_config: ModelConfig):
         """Setup model with quantization for memory efficiency"""
@@ -515,11 +530,8 @@ Summary:"""
         # Set random seed for reproducibility
         set_seed(self.config.random_seed)
         
-        # Load and split dataset
-        train_dataset, val_dataset, test_dataset = self.load_dataset()
-        
-        # We'll use the test set for evaluation
-        dataset = test_dataset
+        # Load dataset for evaluation
+        dataset = self.load_dataset()
         
         # Login to HuggingFace Hub if token is provided
         hf_token = os.getenv("HUGGINGFACE_TOKEN")
