@@ -1,0 +1,50 @@
+# Core ML and Deep Learning Libraries
+torch>=2.5.0
+transformers>=4.50.0
+datasets>=2.14.0
+tokenizers>=0.15.0
+accelerate>=0.35.0
+peft>=0.13.0
+bitsandbytes>=0.44.0
+scipy>=1.11.0
+sentencepiece>=0.2.0
+trl>=0.11.0
+
+# Evaluation Metrics
+rouge-score>=0.1.2
+bert-score>=0.3.13
+evaluate>=0.4.1
+nltk>=3.8.1
+
+# Hyperparameter Optimization
+optuna>=3.4.0
+scikit-learn>=1.3.0
+
+# Data Processing and Analysis
+pandas>=2.1.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+tqdm>=4.66.0
+
+# Utilities and Infrastructure
+tensorboard>=2.14.0
+wandb>=0.15.0
+jupyter>=1.0.0
+python-dotenv>=1.0.0
+
+# File I/O and Storage
+h5py>=3.9.0
+jsonlines>=4.0.0
+pyarrow>=13.0.0
+
+# HuggingFace Hub
+huggingface-hub>=0.20.0
+safetensors>=0.4.0
+
+# For RTX 5090 GPU optimization
+#flash-attn==2.7.3 --no-build-isolation  # Optional: for flash attention support
+triton>=2.1.0      # For GPU optimization
+
+# For medical text processing (optional)
+spacy>=3.7.0
