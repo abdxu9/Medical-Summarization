@@ -49,6 +49,7 @@ from trl import SFTTrainer
 import evaluate
 from rouge_score import rouge_scorer
 import nltk
+import optuna # Add Optuna import
 nltk.download('punkt', quiet=True)
 
 # Load environment variables
@@ -98,16 +99,90 @@ class SearchConfig:
     n_trials: int = 1      # Number of trials to run
     output_dir: str = "./results/hyperparameter"
     dataset_path: str = "./data/mimic-iv-bhc.csv"
-    sample_size: Optional[int] = 100  # Using 1000 examples as requested
+    sample_size: Optional[int] = 10  # Using 1000 examples as requested
     eval_steps: int = 50
     max_steps: int = 10    # Limit for each trial
     save_strategy: str = "steps"
     gradient_checkpointing: bool = True
     max_memory_per_gpu: Optional[str] = "30GiB"  # For RTX 5090
     random_seed: int = 42
-    num_train: int = 80  # 80% of 1000
-    num_val: int = 10    # 10% of 1000
-    num_test: int = 10   # 10% of 1000
+    # num_train, num_val, num_test will be calculated based on sample_size
+    # Ratios for splitting data
+    train_ratio: float = 0.8
+    val_ratio: float = 0.1
+    # test_ratio is implicitly (1.0 - train_ratio - val_ratio)
+
+    # Fields to be computed
+    num_train: int = field(init=False)
+    num_val: int = field(init=False)
+    num_test: int = field(init=False)
+
+    def __post_init__(self):
+        if self.sample_size is None or self.sample_size <= 0:
+            # Fallback to a default small configuration or raise error if sample_size is not usable
+            # For now, assuming CLI provides a positive sample_size.
+            # If sample_size could be None or 0, define behavior e.g.
+            # self.num_train, self.num_val, self.num_test = 0,0,0
+            # and let downstream code handle empty datasets if that's intended.
+            # Or set to some minimal defaults:
+            # self.num_train = 1; self.num_val = 0; self.num_test = 0; if self.sample_size == 1 else ...
+             raise ValueError("sample_size must be a positive integer for splitting.")
+
+
+        self.num_train = int(self.sample_size * self.train_ratio)
+        self.num_val = int(self.sample_size * self.val_ratio)
+
+        # Ensure num_train is at least 1 if sample_size is positive and train_ratio > 0
+        if self.train_ratio > 0 and self.sample_size > 0 and self.num_train == 0:
+            self.num_train = 1
+        
+        # Ensure num_val is at least 1 if val_ratio > 0, and there's enough sample_size
+        # after allocating for num_train, and the calculation resulted in 0.
+        if self.val_ratio > 0 and (self.sample_size - self.num_train) > 0 and self.num_val == 0:
+             self.num_val = 1 # Try to allocate at least one for validation
+             # if it makes sum > sample_size, it will be corrected below
+
+        # Remainder goes to test
+        self.num_test = self.sample_size - self.num_train - self.num_val
+
+        # Adjust if sum exceeds sample_size due to flooring and minimum allocations
+        # (e.g., if num_train=1, num_val=1 for sample_size=1)
+        current_sum = self.num_train + self.num_val + self.num_test
+        if current_sum > self.sample_size:
+            # Reduce from test first, then val, ensuring train is prioritized.
+            reduction = current_sum - self.sample_size
+            self.num_test -= reduction
+            if self.num_test < 0:
+                self.num_val += self.num_test # Add negative num_test to num_val (effectively reducing num_val)
+                self.num_test = 0
+                if self.num_val < 0: # Should not happen if num_train is protected
+                    self.num_train += self.num_val
+                    self.num_val = 0
+        
+        # Ensure no split is negative
+        self.num_train = max(0, self.num_train)
+        self.num_val = max(0, self.num_val)
+        self.num_test = max(0, self.num_test)
+        
+        # Final check: sum of splits should equal sample_size
+        # Re-assign num_test to ensure this, prioritizing train and val.
+        self.num_test = self.sample_size - self.num_train - self.num_val
+        if self.num_test < 0: # This implies num_train + num_val > sample_size
+            # This should ideally not happen if num_train and num_val were calculated correctly from ratios.
+            # This situation occurs if sample_size is too small for the minimums we enforced.
+            # Example: sample_size = 1. num_train = 1. num_val=0. num_test = 0. (Correct)
+            self.num_val = self.sample_size - self.num_train 
+            if self.num_val < 0 : self.num_val = 0
+            self.num_test = 0
+
+
+        self.logger = logging.getLogger(__name__) # Get logger if not already defined
+        self.logger.info(f"Data splits calculated from sample_size {self.sample_size}: "
+                         f"Train={self.num_train}, Val={self.num_val}, Test={self.num_test}")
+        if self.num_train + self.num_val + self.num_test != self.sample_size:
+            self.logger.warning(f"Sum of splits ({self.num_train + self.num_val + self.num_test}) "
+                                f"does not equal sample_size ({self.sample_size}). Review split logic.")
+
 
 class MedicalSummarizationOptimizer:
     """Main class for hyperparameter optimization"""
@@ -438,6 +513,35 @@ Summary:"""
             "warmup_ratio": random.uniform(self.hp_space.warmup_ratio_min, self.hp_space.warmup_ratio_max)
         }
         return params
+
+    def _objective_bayesian(self, trial: optuna.trial.Trial, model_config: ModelConfig) -> float:
+        """Objective function for Optuna Bayesian optimization."""
+        trial_params = {
+            "lora_rank": trial.suggest_int("lora_rank", self.hp_space.lora_rank_min, self.hp_space.lora_rank_max),
+            "lora_alpha": trial.suggest_int("lora_alpha", self.hp_space.lora_alpha_min, self.hp_space.lora_alpha_max),
+            "lora_dropout": trial.suggest_float("lora_dropout", self.hp_space.lora_dropout_min, self.hp_space.lora_dropout_max),
+            "learning_rate": trial.suggest_float("learning_rate", self.hp_space.learning_rate_min, self.hp_space.learning_rate_max, log=True),
+            "batch_size": trial.suggest_categorical("batch_size", self.hp_space.batch_size_choices),
+            "warmup_ratio": trial.suggest_float("warmup_ratio", self.hp_space.warmup_ratio_min, self.hp_space.warmup_ratio_max)
+        }
+
+        # Ensure lora_alpha is at least lora_rank, if desired, or handle constraints.
+        # For now, we sample them independently as per HyperparameterSpace.
+        # A common heuristic is lora_alpha = 2 * lora_rank. If you want to enforce this:
+        # trial_params["lora_alpha"] = 2 * trial_params["lora_rank"]
+        # However, this makes lora_alpha dependent rather than a directly optimized hyperparameter.
+        # Sticking to independent sampling based on defined min/max for now.
+
+        self.logger.info(f"Optuna trial {trial.number} for {model_config.name} with sampled params: {trial_params}")
+        
+        eval_loss, metrics = self.evaluate_trial(model_config, trial_params)
+
+        # Store full metrics and params in Optuna trial's user_attrs for later retrieval
+        # This is useful if evaluate_trial doesn't save every trial's full metrics externally.
+        trial.set_user_attr("metrics", metrics)
+        trial.set_user_attr("params_dict", trial_params) # Store the actual params used by evaluate_trial
+
+        return eval_loss # Optuna minimizes this value
         
     def evaluate_trial(self, model_config: ModelConfig, trial_params: Dict[str, Any]) -> Tuple[float, Dict[str, Any]]:
         """Train and evaluate a model with the given hyperparameters"""
@@ -492,7 +596,7 @@ Summary:"""
             bf16=True,
             tf32=True,
             group_by_length=True,
-            optim="adamw_torch_fused"
+            optim="paged_adamw_8bit"
         )
         
         # Trainer
@@ -656,14 +760,18 @@ Summary:"""
             self.logger.info(f"ROUGE-1={metrics['rouge1']:.4f}, ROUGE-2={metrics['rouge2']:.4f}, ROUGE-L={metrics['rougeL']:.4f}, BERTScore F1={metrics['bertscore_f1']:.4f}")
             
             # Update self.best_results dictionary AFTER all metrics are computed, using the is_best_so_far flag
+            # Update self.best_results dictionary AFTER all metrics are computed, using the is_best_so_far flag
             if is_best_so_far: # is_best_so_far was determined before deleting trainer
+                # Check if the current trial_id indicates an Optuna trial or a random search trial
+                # For Optuna, trial_id might be a string like "phi-3-medium-4k_20250604_085203"
+                # We want self.best_results to store the actual parameters and metrics.
                 self.best_results[model_config.name] = {
-                    "trial_id": trial_id,
-                    "params": trial_params,
+                    "trial_id": trial_id, # This is the unique ID for the training run
+                    "params": trial_params, # The hyperparameters used for this trial
                     "eval_loss": current_eval_loss_for_best_model_check, 
-                    "metrics": metrics # The full metrics dict
+                    "metrics": metrics # The full metrics dict for this trial
                 }
-                self.logger.info(f"Updated best results for {model_config.name}.")
+                self.logger.info(f"Updated best results for {model_config.name} (Trial ID: {trial_id}).")
             
             return metrics['eval_loss'], metrics # Return the eval_loss from the metrics dict for consistency
             
@@ -738,6 +846,54 @@ Summary:"""
             self.logger.info(f"Best metrics: {best_trial['metrics']}")
             
         return {"trials": results, "best_trial": best_trial}
+
+    def bayesian_search(self, model_config: ModelConfig):
+        """Perform Bayesian hyperparameter optimization using Optuna."""
+        self.logger.info(f"Starting Bayesian search for {model_config.name} using Optuna")
+
+        study = optuna.create_study(
+            direction="minimize",
+            sampler=optuna.samplers.TPESampler(seed=self.config.random_seed) # TPE sampler is common for Bayesian optimization
+        )
+        
+        # Use a lambda to pass model_config to the objective function
+        objective_with_model_config = lambda trial: self._objective_bayesian(trial, model_config)
+        
+        study.optimize(objective_with_model_config, n_trials=self.config.n_trials)
+        
+        self.logger.info(f"Bayesian search completed for {model_config.name}")
+
+        processed_trials = []
+        for i, optuna_trial_obj in enumerate(study.trials):
+            trial_data = {
+                "trial_number": optuna_trial_obj.number, # Optuna trial number
+                "params": optuna_trial_obj.user_attrs.get("params_dict", optuna_trial_obj.params),
+                "eval_loss": optuna_trial_obj.value,
+                "metrics": optuna_trial_obj.user_attrs.get("metrics", {})
+            }
+            processed_trials.append(trial_data)
+
+        best_trial_for_return = None
+        if study.best_trial:
+            self.logger.info(f"Optuna Best Trial Number: {study.best_trial.number}")
+            self.logger.info(f"Optuna Best Value (eval_loss): {study.best_trial.value:.4f}")
+            self.logger.info(f"Optuna Best Parameters: {study.best_trial.params}") # These are what Optuna suggested
+            
+            # Construct the best_trial dict to match the structure expected by save_hyperparameter_search_details
+            # self.best_results[model_config.name] is updated by evaluate_trial and is the source of truth for "best overall".
+            # Optuna's best_trial is just its record. For consistency, we can fetch the details from self.best_results
+            # if it corresponds to Optuna's best, or just report Optuna's finding.
+            # The current logic in run_optimization derives the final "best_params_for_main" from self.best_results.
+            # So, what this function returns as "best_trial" is mainly for logging within all_hyperparam_results.
+
+            best_trial_for_return = {
+                "trial_number": study.best_trial.number,
+                "params": study.best_trial.user_attrs.get("params_dict", study.best_trial.params),
+                "eval_loss": study.best_trial.value,
+                "metrics": study.best_trial.user_attrs.get("metrics", {})
+            }
+            
+        return {"trials": processed_trials, "best_trial": best_trial_for_return}
     
     def save_hyperparameter_search_details(self, all_hyperparam_results: Dict[str, Dict]):
         """Saves the detailed results of all hyperparameter search trials."""
@@ -1006,7 +1162,12 @@ Summary:"""
             
             current_model_hyperparam_search_results = {}
             if self.config.method == "random":
-                current_model_hyperparam_search_results = self.random_search(model_config) # This updates self.best_results
+                current_model_hyperparam_search_results = self.random_search(model_config)
+            elif self.config.method == "bayesian":
+                current_model_hyperparam_search_results = self.bayesian_search(model_config)
+            else:
+                self.logger.error(f"Unsupported optimization method: {self.config.method}")
+                continue
                 
             all_hyperparam_results[model_config.name] = current_model_hyperparam_search_results
             
@@ -1033,8 +1194,8 @@ Summary:"""
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(description="Hyperparameter Optimization for Medical Text Summarization")
-    parser.add_argument("--method", choices=["random"], default="random",
-                       help="Optimization method")
+    parser.add_argument("--method", choices=["random", "bayesian"], default="random",
+                       help="Optimization method (random or bayesian)")
     parser.add_argument("--n_trials", type=int, default=10, help="Number of trials")
     parser.add_argument("--output_dir", default="./results/hyperparameter", help="Output directory")
     parser.add_argument("--dataset_path", default="./data/mimic-iv-bhc.csv", help="Path to the MIMIC-IV-BHC dataset")

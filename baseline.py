@@ -66,7 +66,7 @@ class EvaluationConfig:
     """Configuration for evaluation setup"""
     output_dir: str = "./results/baseline"
     dataset_path: str = "./data/mimic-iv-bhc.csv"
-    sample_size: Optional[int] = 100  # Using 1000 examples as requested
+    sample_size: Optional[int] = 1000  # Using 1000 examples as requested
     batch_size: int = 4
     max_new_tokens: int = 512
     random_seed: int = 42
