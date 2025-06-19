@@ -33,7 +33,7 @@ import copy
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any, Union
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from dotenv import load_dotenv
 
 # ML Libraries
@@ -46,15 +46,13 @@ from huggingface_hub import login
 from peft import LoraConfig, get_peft_model, PeftModel, TaskType, PeftConfig
 from datasets import Dataset
 from trl import SFTTrainer
-import evaluate
-from rouge_score import rouge_scorer
-import nltk
 import optuna # Add Optuna import
-nltk.download('punkt', quiet=True)
 
 # Load environment variables
 load_dotenv()
-login(token=os.environ.get('HUGGINGFACE_TOKEN'))
+hf_read_token = os.getenv("HUGGINGFACE_READ_TOKEN")
+if hf_read_token:
+    login(token=hf_read_token)
 
 @dataclass
 class HyperparameterSpace:
@@ -67,7 +65,7 @@ class HyperparameterSpace:
     lora_dropout_max: float = 0.3
     learning_rate_min: float = 1e-5
     learning_rate_max: float = 5e-4
-    batch_size_choices: List[int] = field(default_factory=lambda: [1, 2, 4])
+    batch_size_choices: List[int] = field(default_factory=lambda: [1])
     warmup_ratio_min: float = 0.03
     warmup_ratio_max: float = 0.1
     
@@ -96,12 +94,12 @@ class ModelConfig:
 class SearchConfig:
     """Configuration for hyperparameter search"""
     method: str = "random"  # "random" search as specified
-    n_trials: int = 1      # Number of trials to run
+    n_trials: int = 15      # Number of trials to run
     output_dir: str = "./results/hyperparameter"
     dataset_path: str = "./data/mimic-iv-bhc.csv"
-    sample_size: Optional[int] = 10  # Using 1000 examples as requested
+    sample_size: Optional[int] = 500  # Using 1000 examples as requested
     eval_steps: int = 50
-    max_steps: int = 10    # Limit for each trial
+    max_steps: int = 200    # Limit for each trial
     save_strategy: str = "steps"
     gradient_checkpointing: bool = True
     max_memory_per_gpu: Optional[str] = "30GiB"  # For RTX 5090
@@ -196,13 +194,10 @@ class MedicalSummarizationOptimizer:
         self.setup_logging()
         self.setup_directories()
         
-        # Prepare dataset
         self.train_dataset, self.eval_dataset, self.test_dataset = self.prepare_dataset()
         
-        # For storing the best results
         self.best_results = {}
 
-        # Define the prompt template as a class attribute
         self.prompt_template = """You are a doctor in a hospital. You must summarize the patient's medical history, making sure to highlight the key elements so that our peers can quickly understand the situation, background, assessment, and recommendations regarding the patient.
 
 Patient Record:
@@ -210,6 +205,9 @@ Patient Record:
 {input_text}
 
 Summary:"""
+
+        self.logger.info("Optimizer initialized.")
+
         
     def setup_logging(self):
         """Setup logging"""
@@ -228,6 +226,7 @@ Summary:"""
         Path(self.config.output_dir).mkdir(parents=True, exist_ok=True)
         Path(f"{self.config.output_dir}/models").mkdir(parents=True, exist_ok=True)
         Path(f"{self.config.output_dir}/results").mkdir(parents=True, exist_ok=True)
+        Path(f"{self.config.output_dir}/summaries").mkdir(parents=True, exist_ok=True)
         Path(f"{self.config.output_dir}/visualizations").mkdir(parents=True, exist_ok=True)
         Path("logs").mkdir(exist_ok=True)
         
@@ -274,50 +273,51 @@ Summary:"""
                 name="gemma-3-12b-it",
                 model_type="decoder",
                 model_path="google/gemma-3-12b-it",
-                max_length=8192,  # Limiting context for efficiency
-                lora_target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]
+                max_length=4096,  # Limiting context for efficiency
+                lora_target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+                use_quantization=True  # Using QLoRA for Gemma
             ),
-            ModelConfig(
-                name="bart-large-cnn",
-                model_type="encoder-decoder",
-                model_path="facebook/bart-large-cnn",
-                max_length=1024,
-                lora_target_modules=["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]
-            ),
-            ModelConfig(
-                name="openbiollm-8b",
-                model_type="decoder",
-                model_path="aaditya/Llama3-OpenBioLLM-8B",
-                max_length=8192, # Defaulting to similar as gemma-3
-                # lora_target_modules will be set by __post_init__ to default decoder modules
-                use_quantization=True # Defaulting to True as it's a decoder
-            ),
-            ModelConfig(
-                name="long-t5",
-                model_type="encoder-decoder",
-                model_path="google/long-t5-tglobal-base",
-                max_length=4096,
-                lora_target_modules=["q", "k", "v", "o", "wi", "wo"],
-                use_quantization=False
-            ),
+            #ModelConfig(
+            #    name="bart-large-cnn",
+            #    model_type="encoder-decoder",
+            #    model_path="facebook/bart-large-cnn",
+            #    max_length=1024,
+            #    lora_target_modules=["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]
+            #),
+            #ModelConfig(
+            #    name="openbiollm-8b",
+            #    model_type="decoder",
+            #    model_path="aaditya/Llama3-OpenBioLLM-8B",
+            #    max_length=8192, # Defaulting to similar as gemma-3
+            #    # lora_target_modules will be set by __post_init__ to default decoder modules
+            #    use_quantization=True # Defaulting to True as it's a decoder
+            #),
+            #ModelConfig(
+            #    name="long-t5",
+            #    model_type="encoder-decoder",
+            #    model_path="google/long-t5-tglobal-base",
+            #    max_length=4096,
+            #    lora_target_modules=["q", "k", "v", "o", "wi", "wo"],
+            #    use_quantization=False
+            #),
             ModelConfig(
                 name="led-base",
                 model_type="encoder-decoder",
                 model_path="allenai/led-base-16384",
-                max_length=8192,
+                max_length=4096,
                 # lora_target_modules will be set by __post_init__
                 # to default encoder-decoder modules (e.g., ["q_proj", "k_proj", ...])
                 # which are suitable for LED's BART-like architecture.
                 use_quantization=False
             ),
-            ModelConfig(
-                name="phi-3-medium-4k",
-                model_type="decoder",
-                model_path="microsoft/Phi-3-medium-4k-instruct",
-                max_length=4096,
-                # lora_target_modules will be set by __post_init__ to default decoder modules
-                use_quantization=True
-            )
+            #ModelConfig(
+            #    name="phi-3-medium-4k",
+            #    model_type="decoder",
+            #    model_path="microsoft/Phi-3-medium-4k-instruct",
+            #    max_length=4096,
+            #    # lora_target_modules will be set by __post_init__ to default decoder modules
+            #    use_quantization=True
+            #)
         ]
         
     def create_model_with_lora(self, model_config: ModelConfig, trial_params: Dict[str, Any]):
@@ -548,35 +548,22 @@ Summary:"""
         trial_id = f"{model_config.name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.logger.info(f"Starting trial {trial_id} with params: {trial_params}")
         
-        # Create model with LoRA
         model, tokenizer = self.create_model_with_lora(model_config, trial_params)
         
-        # Tokenize datasets
         train_dataset_tokenized = self.tokenize_dataset(self.train_dataset, tokenizer, model_config)
         eval_dataset_tokenized = self.tokenize_dataset(self.eval_dataset, tokenizer, model_config)
         
-        # Data collator
         if model_config.model_type == "decoder":
-            data_collator = DataCollatorForLanguageModeling(
-                tokenizer=tokenizer,
-                mlm=False,
-                pad_to_multiple_of=8
-            )
-        else:  # encoder-decoder
-            data_collator = DataCollatorForSeq2Seq(
-                tokenizer=tokenizer,
-                model=model,
-                label_pad_token_id=-100,
-                pad_to_multiple_of=8
-            )
+            data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False, pad_to_multiple_of=8)
+        else:
+            data_collator = DataCollatorForSeq2Seq(tokenizer=tokenizer, model=model, label_pad_token_id=-100, pad_to_multiple_of=8)
             
-        # Training arguments
         training_args = TrainingArguments(
             output_dir=f"{self.config.output_dir}/models/{trial_id}",
             num_train_epochs=3,
             per_device_train_batch_size=trial_params["batch_size"],
             per_device_eval_batch_size=trial_params["batch_size"],
-            gradient_accumulation_steps=max(1, 8 // trial_params["batch_size"]),  # Effective batch size of 8
+            gradient_accumulation_steps=max(1, 8 // trial_params["batch_size"]),
             learning_rate=trial_params["learning_rate"],
             warmup_ratio=trial_params["warmup_ratio"],
             logging_steps=25,
@@ -588,7 +575,7 @@ Summary:"""
             load_best_model_at_end=True,
             metric_for_best_model="eval_loss",
             greater_is_better=False,
-            report_to="tensorboard",
+            report_to="none",
             remove_unused_columns=False,
             dataloader_pin_memory=True,
             gradient_checkpointing=self.config.gradient_checkpointing,
@@ -599,7 +586,6 @@ Summary:"""
             optim="paged_adamw_8bit"
         )
         
-        # Trainer
         trainer = Trainer(
             model=model,
             args=training_args,
@@ -609,199 +595,65 @@ Summary:"""
             data_collator=data_collator
         )
         
-        # Train model
         try:
             trainer.train()
             
-            # Get final evaluation loss
             eval_results = trainer.evaluate()
             eval_loss = eval_results.get("eval_loss", float('inf'))
             
-            # Evaluate on test set
-            test_dataset_tokenized = self.tokenize_dataset(self.test_dataset, tokenizer, model_config)
-            test_results = trainer.evaluate(test_dataset_tokenized)
-            test_loss = test_results.get("eval_loss", float('inf'))
+            metrics = {"eval_loss": eval_loss}
             
-            # Generate some summaries for ROUGE and BERTScore evaluation
-            
-            # rouge_evaluator is self.rouge_evaluator, bertscore_evaluator is self.bertscore_evaluator
-            # from __init__ if you refactor metric loading there, or define them here.
-            rouge_evaluator = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
-            
-            # Load BERTScore with a smaller model to save memory
-            self.logger.info("Loading BERTScore evaluator with roberta-base model...")
-            try:
-                bertscore_evaluator = evaluate.load("bertscore", model_type="roberta-base")
-            except Exception as e_bert_load:
-                self.logger.error(f"Failed to load BERTScore with roberta-base: {e_bert_load}. Falling back to default.")
-                bertscore_evaluator = evaluate.load("bertscore") # Fallback to default if roberta-base fails for some reason
-
-            # Sample a subset for metric evaluation
-            sample_size = min(20, len(self.test_dataset)) # Using 20 examples for ROUGE/BERTScore
-            test_sample = self.test_dataset.select(range(sample_size))
-            
-            generated_summaries_for_test_sample = []
-            reference_summaries_for_test_sample = [ex["target_summary"] for ex in test_sample]
-            per_example_rouge_scores = [] # To store dicts of ROUGE scores
-
-            # Use the class-level prompt_template
-            prompt_template_to_use = self.prompt_template 
-
-            self.logger.info(f"Generating {len(test_sample)} summaries for ROUGE and BERTScore evaluation...")
-            for i, example in enumerate(test_sample):
-                current_generated_text = ""
-                try:
-                    if model_config.model_type == "decoder":
-                        prompt = prompt_template_to_use.format(input_text=example["input_text"])
-                        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, 
-                                          max_length=model_config.max_length).to(model.device)
-                        with torch.no_grad():
-                            outputs = model.generate(
-                                **inputs, 
-                                max_new_tokens=512, # Consider making this configurable
-                                do_sample=False,    # Consistent with original, no sampling
-                                temperature=model_config.temperature 
-                            )
-                        current_generated_text = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
-                    else:  # encoder-decoder
-                        inputs = tokenizer(example["input_text"], return_tensors="pt", truncation=True,
-                                          max_length=model_config.max_length).to(model.device)
-                        with torch.no_grad():
-                            outputs = model.generate(
-                                **inputs,
-                                max_new_tokens=512, # Consider making this configurable
-                                do_sample=False     # Consistent with original
-                            )
-                        current_generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-                    
-                    current_generated_text = current_generated_text.strip()
-                except Exception as e_gen:
-                    self.logger.error(f"Error generating summary for example {i}: {e_gen}")
-                    current_generated_text = "" # Fallback to empty string
-
-                generated_summaries_for_test_sample.append(current_generated_text)
-                
-                # Calculate ROUGE for this example
-                rouge_result = rouge_evaluator.score(example["target_summary"], current_generated_text)
-                per_example_rouge_scores.append({
-                    "rouge1": rouge_result["rouge1"].fmeasure,
-                    "rouge2": rouge_result["rouge2"].fmeasure,
-                    "rougeL": rouge_result["rougeL"].fmeasure
-                })
-
-            self.logger.info("Summary generation for metrics complete.")
-
-            # --- Save model BEFORE deleting trainer, if it's the best one ---
-            current_eval_loss_for_best_model_check = eval_results.get("eval_loss", float('inf')) # Use eval_loss from validation
-            is_best_so_far = False
+            current_eval_loss_for_best_model_check = eval_loss
             if model_config.name not in self.best_results or \
                current_eval_loss_for_best_model_check < self.best_results[model_config.name]["eval_loss"]:
-                is_best_so_far = True
-            
-            if is_best_so_far:
                 best_model_path = f"{self.config.output_dir}/models/best_{model_config.name}"
-                Path(best_model_path).mkdir(parents=True, exist_ok=True)
-                if 'trainer' in locals() and trainer is not None:
-                    self.logger.info(f"Saving new best model for {model_config.name} to {best_model_path} (eval_loss: {current_eval_loss_for_best_model_check:.4f})")
-                    trainer.save_model(best_model_path)
-                else:
-                    self.logger.warning("Trainer object not available for saving the best model. This should not happen.")
-
-            # Now that all generations and potential model saving are done, release the main model and trainer from GPU
-            self.logger.info("Releasing main model and trainer from GPU before BERTScore calculation.")
-            if 'trainer' in locals() and trainer is not None:
-                del trainer
-                self.logger.info("Trainer object deleted.")
-            if 'model' in locals() and model is not None: # model is part of trainer, but also a direct reference
-                del model
-                self.logger.info("Model object deleted.")
-            
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            self.logger.info("GPU memory cleared for BERTScore.")
-            
-            # Calculate BERTScore
-            # Ensure predictions and references are lists of strings
-            # Filter out empty predictions for BERTScore if the library handles it poorly,
-            # or ensure it can handle them. The original script didn't explicitly filter.
-            # For now, pass all generated summaries.
-            self.logger.info(f"Calculating BERTScore for {len(generated_summaries_for_test_sample)} samples...")
-            # Use a smaller batch_size for BERTScore computation
-            bert_score_calculation_batch_size = 4 
-            bert_results = bertscore_evaluator.compute(
-                predictions=generated_summaries_for_test_sample,
-                references=reference_summaries_for_test_sample,
-                lang="en",
-                batch_size=bert_score_calculation_batch_size
-            )
-            self.logger.info("BERTScore calculation complete.")
-            
-            # Aggregate ROUGE scores
-            avg_rouge1 = np.mean([score["rouge1"] for score in per_example_rouge_scores])
-            avg_rouge2 = np.mean([score["rouge2"] for score in per_example_rouge_scores])
-            avg_rougeL = np.mean([score["rougeL"] for score in per_example_rouge_scores])
-            
-            # Average BERTScore (ensure 'f1' is a list/array of numbers)
-            avg_bert_f1 = np.mean(bert_results["f1"]) if "f1" in bert_results and len(bert_results["f1"]) > 0 else 0.0
-            
-            # Combine all metrics
-            # eval_loss and test_loss come from trainer.evaluate() calls earlier in the try block
-            metrics = {
-                "eval_loss": eval_results.get("eval_loss", float('inf')), # Assuming eval_results is populated
-                "test_loss": test_results.get("eval_loss", float('inf')), # Assuming test_results is populated
-                "rouge1": avg_rouge1,
-                "rouge2": avg_rouge2,
-                "rougeL": avg_rougeL,
-                "bertscore_f1": avg_bert_f1
-            }
-            
-            self.logger.info(f"Trial {trial_id} completed with eval_loss={metrics['eval_loss']:.4f}, test_loss={metrics['test_loss']:.4f}")
-            self.logger.info(f"ROUGE-1={metrics['rouge1']:.4f}, ROUGE-2={metrics['rouge2']:.4f}, ROUGE-L={metrics['rougeL']:.4f}, BERTScore F1={metrics['bertscore_f1']:.4f}")
-            
-            # Update self.best_results dictionary AFTER all metrics are computed, using the is_best_so_far flag
-            # Update self.best_results dictionary AFTER all metrics are computed, using the is_best_so_far flag
-            if is_best_so_far: # is_best_so_far was determined before deleting trainer
-                # Check if the current trial_id indicates an Optuna trial or a random search trial
-                # For Optuna, trial_id might be a string like "phi-3-medium-4k_20250604_085203"
-                # We want self.best_results to store the actual parameters and metrics.
+                self.logger.info(f"Saving new best model for {model_config.name} to {best_model_path} (eval_loss: {current_eval_loss_for_best_model_check:.4f})")
+                trainer.save_model(best_model_path)
                 self.best_results[model_config.name] = {
-                    "trial_id": trial_id, # This is the unique ID for the training run
-                    "params": trial_params, # The hyperparameters used for this trial
+                    "trial_id": trial_id,
+                    "params": trial_params,
                     "eval_loss": current_eval_loss_for_best_model_check, 
-                    "metrics": metrics # The full metrics dict for this trial
+                    "metrics": metrics
                 }
-                self.logger.info(f"Updated best results for {model_config.name} (Trial ID: {trial_id}).")
             
-            return metrics['eval_loss'], metrics # Return the eval_loss from the metrics dict for consistency
+            return eval_loss, metrics
             
         except Exception as e:
             self.logger.error(f"Error in trial {trial_id}: {e}")
             return float('inf'), {"error": str(e)}
         finally:
-            # Clean up safely, variables might have been deleted already
+            # Clean up safely to prevent memory leaks between trials
             self.logger.info("Entering finally block for cleanup in evaluate_trial.")
-            try:
-                if 'model' in locals() and model is not None:
-                    del model
-                    self.logger.info("Model deleted in finally.")
-            except NameError:
-                self.logger.info("Model was not defined or already deleted before finally.")
             
-            try:
-                if 'tokenizer' in locals() and tokenizer is not None: # tokenizer is not deleted before, so this should be fine
-                    del tokenizer
-                    self.logger.info("Tokenizer deleted in finally.")
-            except NameError:
-                self.logger.info("Tokenizer was not defined before finally.")
+            # Deleting the trainer first, as it holds references to model, tokenizer, and data_collator
+            if 'trainer' in locals():
+                del trainer
+                self.logger.info("Trainer deleted.")
+            
+            # The data collator can also hold a reference to the model
+            if 'data_collator' in locals():
+                del data_collator
+                self.logger.info("Data collator deleted.")
 
-            try:
-                if 'trainer' in locals() and trainer is not None:
-                    del trainer
-                    self.logger.info("Trainer deleted in finally.")
-            except NameError:
-                self.logger.info("Trainer was not defined or already deleted before finally.")
+            if 'model' in locals():
+                if self.device == "cuda":
+                    model.to('cpu')
+                del model
+                self.logger.info("Model moved to CPU and deleted.")
             
+            if 'tokenizer' in locals():
+                del tokenizer
+                self.logger.info("Tokenizer deleted.")
+
+            if 'train_dataset_tokenized' in locals():
+                del train_dataset_tokenized
+                self.logger.info("Tokenized train dataset deleted.")
+
+            if 'eval_dataset_tokenized' in locals():
+                del eval_dataset_tokenized
+                self.logger.info("Tokenized eval dataset deleted.")
+
+            # Force garbage collection and clear GPU cache
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -812,51 +664,34 @@ Summary:"""
         self.logger.info(f"Starting random search for {model_config.name}")
         
         results = []
-        best_trial = None
+        best_trial_so_far = None
         best_value = float('inf')
         
         for trial_idx in range(self.config.n_trials):
-            # Sample hyperparameters
             trial_params = self.sample_hyperparameters()
             self.logger.info(f"Trial {trial_idx+1}/{self.config.n_trials} for {model_config.name}")
             
-            # Evaluate trial
             eval_loss, metrics = self.evaluate_trial(model_config, trial_params)
             
-            # Store results
-            result = {
-                "trial_number": trial_idx,
-                "params": trial_params,
-                "eval_loss": eval_loss,
-                "metrics": metrics
-            }
+            result = {"trial_number": trial_idx, "params": trial_params, "eval_loss": eval_loss, "metrics": metrics}
             results.append(result)
             
-            # Update best trial
             if eval_loss < best_value:
                 best_value = eval_loss
-                best_trial = result
-                self.logger.info(f"New best trial found: {trial_idx} with eval_loss={eval_loss:.4f}")
+                best_trial_so_far = result
                 
-        # Print results
         self.logger.info(f"Random search completed for {model_config.name}")
-        if best_trial:
-            self.logger.info(f"Best trial: {best_trial['trial_number']} with eval_loss={best_trial['eval_loss']:.4f}")
-            self.logger.info(f"Best parameters: {best_trial['params']}")
-            self.logger.info(f"Best metrics: {best_trial['metrics']}")
-            
-        return {"trials": results, "best_trial": best_trial}
+        if best_trial_so_far:
+            self.logger.info(f"Best trial for {model_config.name} is {best_trial_so_far['trial_number']} with eval_loss: {best_trial_so_far['eval_loss']:.4f}")
+
+        return {"trials": results, "best_trial": best_trial_so_far}
 
     def bayesian_search(self, model_config: ModelConfig):
         """Perform Bayesian hyperparameter optimization using Optuna."""
         self.logger.info(f"Starting Bayesian search for {model_config.name} using Optuna")
 
-        study = optuna.create_study(
-            direction="minimize",
-            sampler=optuna.samplers.TPESampler(seed=self.config.random_seed) # TPE sampler is common for Bayesian optimization
-        )
+        study = optuna.create_study(direction="minimize", sampler=optuna.samplers.TPESampler(seed=self.config.random_seed))
         
-        # Use a lambda to pass model_config to the objective function
         objective_with_model_config = lambda trial: self._objective_bayesian(trial, model_config)
         
         study.optimize(objective_with_model_config, n_trials=self.config.n_trials)
@@ -864,9 +699,9 @@ Summary:"""
         self.logger.info(f"Bayesian search completed for {model_config.name}")
 
         processed_trials = []
-        for i, optuna_trial_obj in enumerate(study.trials):
+        for optuna_trial_obj in study.trials:
             trial_data = {
-                "trial_number": optuna_trial_obj.number, # Optuna trial number
+                "trial_number": optuna_trial_obj.number,
                 "params": optuna_trial_obj.user_attrs.get("params_dict", optuna_trial_obj.params),
                 "eval_loss": optuna_trial_obj.value,
                 "metrics": optuna_trial_obj.user_attrs.get("metrics", {})
@@ -875,24 +710,14 @@ Summary:"""
 
         best_trial_for_return = None
         if study.best_trial:
-            self.logger.info(f"Optuna Best Trial Number: {study.best_trial.number}")
-            self.logger.info(f"Optuna Best Value (eval_loss): {study.best_trial.value:.4f}")
-            self.logger.info(f"Optuna Best Parameters: {study.best_trial.params}") # These are what Optuna suggested
-            
-            # Construct the best_trial dict to match the structure expected by save_hyperparameter_search_details
-            # self.best_results[model_config.name] is updated by evaluate_trial and is the source of truth for "best overall".
-            # Optuna's best_trial is just its record. For consistency, we can fetch the details from self.best_results
-            # if it corresponds to Optuna's best, or just report Optuna's finding.
-            # The current logic in run_optimization derives the final "best_params_for_main" from self.best_results.
-            # So, what this function returns as "best_trial" is mainly for logging within all_hyperparam_results.
-
+            self.logger.info(f"Optuna Best Trial Found: Number {study.best_trial.number} with eval_loss {study.best_trial.value:.4f}")
             best_trial_for_return = {
                 "trial_number": study.best_trial.number,
-                "params": study.best_trial.user_attrs.get("params_dict", study.best_trial.params),
+                "params": study.best_trial.params,
                 "eval_loss": study.best_trial.value,
                 "metrics": study.best_trial.user_attrs.get("metrics", {})
             }
-            
+
         return {"trials": processed_trials, "best_trial": best_trial_for_return}
     
     def save_hyperparameter_search_details(self, all_hyperparam_results: Dict[str, Dict]):
@@ -908,166 +733,7 @@ Summary:"""
         # Visualizations for hyperparameter search
         self._create_visualizations(all_hyperparam_results, timestamp)
 
-    def generate_and_save_best_model_outputs(self):
-        """Loads the best fine-tuned model for each type, generates summaries on the test set, and saves them."""
-        self.logger.info("Generating summaries from best models identified during hyperparameter search...")
-
-        if not hasattr(self, 'search_timestamp'):
-            self.search_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        for model_name, best_trial_data in self.best_results.items():
-            if not best_trial_data:
-                self.logger.warning(f"No best trial data found for {model_name}. Skipping summary generation.")
-                continue
-
-            self.logger.info(f"Processing best model for: {model_name}")
-
-            current_model_config = next((mc for mc in self.get_model_configs() if mc.name == model_name), None)
-            if not current_model_config:
-                self.logger.error(f"Could not find ModelConfig for {model_name}. Skipping.")
-                continue
-
-            best_adapter_path = f"{self.config.output_dir}/models/best_{model_name}"
-            if not Path(best_adapter_path).exists():
-                self.logger.warning(f"Best model adapter path not found for {model_name} at {best_adapter_path}. Skipping summary generation.")
-                continue
-
-            self.logger.info(f"Loading best PEFT model for {model_name} from {best_adapter_path}")
-
-            bnb_config_final = None
-            if current_model_config.use_quantization and current_model_config.model_type == "decoder":
-                bnb_config_final = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_compute_dtype=torch.bfloat16,
-                    bnb_4bit_use_double_quant=True
-                )
-
-            model_kwargs_final = {
-                "device_map": "auto",
-                "trust_remote_code": True,
-            }
-            if bnb_config_final:
-                model_kwargs_final["quantization_config"] = bnb_config_final
-                model_kwargs_final["torch_dtype"] = torch.bfloat16 if "gemma" in current_model_config.model_path.lower() else torch.float16
-            else:
-                model_kwargs_final["torch_dtype"] = torch.float16
-
-            tokenizer_final = AutoTokenizer.from_pretrained(current_model_config.model_path)
-            if tokenizer_final.pad_token is None:
-                tokenizer_final.pad_token = tokenizer_final.eos_token
-
-            base_model_final = None
-            try:
-                if current_model_config.model_type == "decoder":
-                    if "gemma-3" in current_model_config.model_path.lower():
-                        base_model_final = Gemma3ForConditionalGeneration.from_pretrained(
-                            current_model_config.model_path, **model_kwargs_final
-                        )
-                    else:
-                        base_model_final = AutoModelForCausalLM.from_pretrained(
-                            current_model_config.model_path, **model_kwargs_final
-                        )
-                else:
-                    base_model_final = AutoModelForSeq2SeqLM.from_pretrained(
-                        current_model_config.model_path, **model_kwargs_final
-                    )
-            except Exception as e:
-                self.logger.error(f"Failed to load base model {current_model_config.name} for final summarization: {e}")
-                continue
-
-            model_final = None
-            try:
-                model_final = PeftModel.from_pretrained(base_model_final, best_adapter_path)
-                model_final.eval()
-                self.logger.info(f"Successfully loaded PEFT model for {model_name}.")
-            except Exception as e:
-                self.logger.error(f"Failed to load PEFT adapter for {model_name} from {best_adapter_path}: {e}")
-                del base_model_final, tokenizer_final
-                gc.collect()
-                if torch.cuda.is_available(): torch.cuda.empty_cache()
-                continue
-
-            generated_summaries_final = []
-            generation_times_final = []
-            
-            # Use a SearchConfig like structure for generation parameters
-            # Let's use a simple dictionary for generation params for now or adapt self.config
-            # For this specific task, we'll define max_new_tokens here.
-            # Max new tokens for the best model summarization output
-            max_new_tokens_for_final_summary = 512 
-
-
-            self.logger.info(f"Generating summaries for {model_name} on the test set ({len(self.test_dataset)} examples)...")
-            for i, example in enumerate(self.test_dataset):
-                try:
-                    start_time_final = time.time()
-                    if current_model_config.model_type == "decoder":
-                        prompt = self.prompt_template.format(input_text=example["input_text"])
-                        inputs = tokenizer_final(prompt, return_tensors="pt", truncation=True,
-                                               max_length=current_model_config.max_length).to(model_final.device)
-                        generation_kwargs = {
-                            "max_new_tokens": max_new_tokens_for_final_summary,
-                            "do_sample": False,
-                            "temperature": current_model_config.temperature,
-                            "pad_token_id": tokenizer_final.eos_token_id,
-                            "eos_token_id": tokenizer_final.eos_token_id
-                        }
-                        with torch.no_grad():
-                            outputs = model_final.generate(**inputs, **generation_kwargs)
-                        generated_text = tokenizer_final.decode(outputs[0][inputs.input_ids.shape[1]:],
-                                                              skip_special_tokens=True)
-                    else:  # encoder-decoder
-                        inputs = tokenizer_final(example["input_text"], return_tensors="pt",
-                                               truncation=True, max_length=current_model_config.max_length).to(model_final.device)
-                        with torch.no_grad():
-                            outputs = model_final.generate(
-                                **inputs,
-                                max_new_tokens=max_new_tokens_for_final_summary,
-                                min_length=50, # Common for BART summarization
-                                length_penalty=2.0, # Common for BART summarization
-                                num_beams=4, # Common for BART summarization
-                                early_stopping=True, # Common for BART summarization
-                                temperature=current_model_config.temperature
-                            )
-                        generated_text = tokenizer_final.decode(outputs[0], skip_special_tokens=True)
-
-                    generated_summaries_final.append(generated_text.strip())
-                    end_time_final = time.time()
-                    generation_times_final.append(end_time_final - start_time_final)
-                    if (i + 1) % 10 == 0 or i == len(self.test_dataset) - 1:
-                        self.logger.info(f"Generated summary {i+1}/{len(self.test_dataset)} for {model_name}. Avg time: {np.mean(generation_times_final):.2f}s")
-
-                except Exception as e_gen:
-                    self.logger.error(f"Error generating summary for example {i} with {model_name}: {e_gen}")
-                    generated_summaries_final.append("")
-                    if "CUDA" in str(e_gen):
-                        self.logger.warning("CUDA error during final summary generation. Clearing cache.")
-                        gc.collect()
-                        if torch.cuda.is_available(): torch.cuda.empty_cache()
-
-            output_data_final = {
-                "model_name": model_name,
-                "best_trial_params": best_trial_data.get("params"),
-                "summaries": generated_summaries_final,
-                "references": [ex["target_summary"] for ex in self.test_dataset], # Extract list of strings
-                "inputs": [ex["input_text"] for ex in self.test_dataset]      # Extract list of strings
-            }
-
-            summaries_dir = Path(f"{self.config.output_dir}/summaries")
-            summaries_dir.mkdir(parents=True, exist_ok=True)
-            summary_file_path = summaries_dir / f"best_{model_name}_summaries_{self.search_timestamp}.json"
-            with open(summary_file_path, 'w') as f:
-                json.dump(output_data_final, f, indent=2)
-            self.logger.info(f"Saved generated summaries from best {model_name} to {summary_file_path}")
-
-            del model_final, base_model_final, tokenizer_final
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            self.logger.info(f"Cleaned up resources for {model_name} after summary generation.")
-
-        self.logger.info("Finished generating and saving summaries for all best models.")
+    
 
     def _create_visualizations(self, model_results: Dict[str, Dict], timestamp: str):
         """Create visualizations of hyperparameter search results"""
@@ -1145,10 +811,7 @@ Summary:"""
         # Set random seed for reproducibility
         set_seed(self.config.random_seed)
         
-        # Login to HuggingFace Hub if token is provided
-        hf_token = os.getenv("HUGGINGFACE_TOKEN")
-        if hf_token:
-            login(hf_token)
+        
         
         # Get model configurations
         model_configs = self.get_model_configs()
@@ -1174,8 +837,7 @@ Summary:"""
         # Save the detailed hyperparameter search results (logs of all trials)
         self.save_hyperparameter_search_details(all_hyperparam_results)
 
-        # Now, generate and save summaries for the best model of each type
-        self.generate_and_save_best_model_outputs()
+        # Score calculation and summary generation has been removed.
         
         # Prepare the return value for main() function (best params for each model)
         # This can be derived from self.best_results, which is updated by random_search
@@ -1187,9 +849,112 @@ Summary:"""
                     'eval_loss': data['eval_loss'],
                     'metrics': data.get('metrics', {}) 
                 }
-        
-        self.logger.info("Hyperparameter optimization and best model summary generation completed.")
         return best_params_for_main
+
+    def generate_summaries(self, num_summaries: int = 2):
+        """Generate summaries for the best performing model of each architecture."""
+        self.logger.info(f"Starting summary generation for {num_summaries} samples.")
+
+        if not self.test_dataset or len(self.test_dataset) == 0:
+            self.logger.warning("Test dataset is empty. Skipping summary generation.")
+            return
+
+        if len(self.test_dataset) < num_summaries:
+            self.logger.warning(f"Requested {num_summaries} summaries, but test set only has {len(self.test_dataset)} samples. Generating {len(self.test_dataset)} instead.")
+            num_summaries = len(self.test_dataset)
+
+        test_samples = self.test_dataset.shuffle(seed=self.config.random_seed).select(range(num_summaries))
+        model_configs = self.get_model_configs()
+
+        for model_config in model_configs:
+            best_model_path = f"{self.config.output_dir}/models/best_{model_config.name}"
+            if not os.path.isdir(best_model_path):
+                self.logger.warning(f"No best model found for {model_config.name} at {best_model_path}. Skipping summary generation for this model.")
+                continue
+
+            self.logger.info(f"Generating summaries for {model_config.name} using model from {best_model_path}")
+
+            model_kwargs = {
+                "device_map": "auto",
+                "trust_remote_code": True,
+            }
+            if model_config.use_quantization and model_config.model_type == "decoder":
+                bnb_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=torch.bfloat16,
+                    bnb_4bit_use_double_quant=True
+                )
+                model_kwargs["quantization_config"] = bnb_config
+                model_kwargs["torch_dtype"] = torch.bfloat16
+            else:
+                model_kwargs["torch_dtype"] = torch.float16
+
+            if model_config.model_type == "encoder-decoder":
+                base_model = AutoModelForSeq2SeqLM.from_pretrained(model_config.model_path, **model_kwargs)
+            else:
+                if "gemma-3" in model_config.model_path.lower():
+                    base_model = Gemma3ForConditionalGeneration.from_pretrained(model_config.model_path, **model_kwargs)
+                else:
+                    base_model = AutoModelForCausalLM.from_pretrained(model_config.model_path, **model_kwargs)
+            
+            tokenizer = AutoTokenizer.from_pretrained(model_config.model_path)
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.padding_side = "left"
+
+            model = PeftModel.from_pretrained(base_model, best_model_path)
+            model.eval()
+
+            generated_summaries = []
+            from tqdm import tqdm
+            for sample in tqdm(test_samples, desc=f"Generating summaries for {model_config.name}"):
+                input_text = sample['input_text']
+
+                if model_config.model_type == "decoder":
+                    prompt = self.prompt_template.format(input_text=input_text)
+                    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=model_config.max_length).to(self.device)
+                else:
+                    inputs = tokenizer(input_text, return_tensors="pt", truncation=True, max_length=model_config.max_length).to(self.device)
+
+                with torch.no_grad():
+                    outputs = model.generate(
+                        **inputs,
+                        max_new_tokens=512,
+                        temperature=model_config.temperature,
+                        do_sample=True,
+                        pad_token_id=tokenizer.eos_token_id
+                    )
+                
+                generated_tokens = outputs[0]
+                if model_config.model_type == "decoder":
+                    input_length = inputs.input_ids.shape[1]
+                    generated_tokens = generated_tokens[input_length:]
+
+                generated_summary = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+                generated_summaries.append(generated_summary.strip())
+            
+            best_hyperparams_for_model = self.best_results.get(model_config.name, {})
+
+            output_data = {
+                "model_config": asdict(model_config),
+                "best_hyperparameters": best_hyperparams_for_model,
+                "summaries": generated_summaries,
+                "references": test_samples["target_summary"],
+                "inputs": test_samples["input_text"]
+            }
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            summary_file = f"{self.config.output_dir}/summaries/{model_config.name}_summaries_{timestamp}.json"
+            with open(summary_file, 'w') as f:
+                json.dump(output_data, f, indent=2)
+            self.logger.info(f"Saved {len(generated_summaries)} summaries for {model_config.name} to {summary_file}")
+            
+            del model, base_model, tokenizer
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        self.logger.info("Summary generation finished.")
 
 def main():
     """Main entry point"""
@@ -1202,6 +967,7 @@ def main():
     parser.add_argument("--max_steps", type=int, default=10, help="Maximum training steps per trial")
     parser.add_argument("--sample_size", type=int, default=100, help="Number of examples to use")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--num_summaries", type=int, default=30, help="Number of summaries to generate from the test set for each best model. 0 to disable.")
     
     args = parser.parse_args()
     
@@ -1222,6 +988,9 @@ def main():
     # Run optimization
     optimizer = MedicalSummarizationOptimizer(hp_space, search_config)
     best_params = optimizer.run_optimization()
+
+    if args.num_summaries > 0:
+        optimizer.generate_summaries(num_summaries=args.num_summaries)
     
     print("\n" + "="*50)
     print("HYPERPARAMETER OPTIMIZATION COMPLETED")

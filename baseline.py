@@ -49,7 +49,9 @@ nltk.download('punkt', quiet=True)
 
 # Load environment variables
 load_dotenv()
-login(token=os.environ.get('HUGGINGFACE_TOKEN'))
+hf_read_token = os.getenv("HUGGINGFACE_READ_TOKEN")
+if hf_read_token:
+    login(token=hf_read_token)
 
 @dataclass
 class ModelConfig:
@@ -533,10 +535,6 @@ Summary:"""
         # Load dataset for evaluation
         dataset = self.load_dataset()
         
-        # Login to HuggingFace Hub if token is provided
-        hf_token = os.getenv("HUGGINGFACE_TOKEN")
-        if hf_token:
-            login(hf_token)
         
         # Get model configurations
         model_configs = self.get_model_configs()

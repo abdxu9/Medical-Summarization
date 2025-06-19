@@ -1,169 +1,178 @@
-# Medical Text Summarization with Gemma 3-12B-IT and BART-Large-CNN
+# Medical Text Summarization using Large Language Models
 
-This repository contains the code and resources for evaluating and fine-tuning large language models (Gemma 3-12B-IT and BART-Large-CNN) for medical history summarization using the MIMIC-IV-BHC dataset.
+This repository offers a complete, research‑grade framework for the development and systematic evaluation of large language models (LLMs) that generate concise "Brief Hospital Course" (BHC) summaries from discharge notes contained in the **MIMIC‑IV‑BHC** corpus.  The overarching objective is to accelerate clinical comprehension by producing Situation–Background–Assessment–Recommendation (SBAR) narratives that distil each patient’s hospital trajectory into a form that is immediately intelligible to busy healthcare professionals.
 
 ## Project Overview
 
-The goal of this project is to establish baseline performance and optimize hyperparameters for two language models on a medical summarization task. The models will summarize patient discharge notes into concise hospital course summaries, which can help healthcare professionals quickly understand a patient's situation, background, assessment, and recommendations.
+The workflow embodied in this repository proceeds through five sequential phases—baseline benchmarking, hyper‑parameter optimisation, full‑scale fine‑tuning, independent evaluation, and dissemination.  Each phase is encapsulated in a dedicated script whose behaviour can be controlled from the command line, thereby permitting reproducible experimentation.  During optimisation we employ Low‑Rank Adaptation (LoRA) and its quantised variant (QLoRA) in order to minimise computational cost without compromising linguistic fidelity.
 
-### Models
+## Models Supported
 
-- **Gemma 3-12B-IT**: A decoder-only model with 12 billion parameters, fine-tuned with QLoRA
-- **BART-Large-CNN**: An encoder-decoder model fine-tuned on CNN/DailyMail, adapted with LoRA
+The current implementation accommodates six state‑of‑the‑art language‑generation architectures.  Three are decoder‑only transformers—**google/gemma‑3‑12b‑it**, **microsoft/Phi‑3‑medium‑4k‑instruct**, and **aaditya/Llama3‑OpenBioLLM‑8B**—while the remaining three are encoder–decoder models: **facebook/bart‑large‑cnn**, **allenai/led‑base‑16384**, and **google/long‑t5‑tglobal‑base**.  The modular training loop can be readily extended to additional checkpoints by supplying appropriately formatted configuration files.
 
-### Dataset
+## Dataset
 
-We use the MIMIC-IV-BHC (Brief Hospital Course) dataset, which contains:
-- 270,033 clinical notes with an average token length of 2,267
-- Each note paired with a corresponding BHC summary (average token length of 564)
-- The dataset will be split into training (80%), validation (10%), and test (10%) sets
-- We'll start with a sample of 1,000 examples for initial experiments
+All experiments rely on the *MIMIC‑IV‑BHC* dataset, which consists of 270 033 de‑identified discharge notes (mean length ≈ 2 267 tokens) paired with reference BHC summaries (mean length ≈ 564 tokens).  By default, each script operates on a stratified subsample to accelerate prototyping; a single flag change activates the full dataset for definitive training.
 
 ## Setup and Installation
 
-### Hardware Requirements
+### Hardware requirements
 
-- GPU: RTX 5090 with 32GB VRAM (or equivalent)
-- RAM: 32GB+ recommended
-- Storage: 50GB+ free space
+A single **NVIDIA GPU** offering at least 24 GB of dedicated VRAM (for example an RTX 3090, 4090, or 5090) is strongly recommended.  Systems should also provide ≥ 32 GB of system RAM and no less than 50 GB of free local storage.
 
-### Environment Setup
+### Environment initialisation
 
-1. Clone this repository:
+Clone the repository and enter the working directory:
+
 ```bash
 git clone https://github.com/yourusername/medical-text-summarization.git
 cd medical-text-summarization
 ```
 
-2. Run the setup script:
+Execute the setup script, which creates an isolated Python virtual environment, installs all dependencies, and prepares the required folder hierarchy:
+
 ```bash
 chmod +x setup.sh
 ./setup.sh
 ```
 
-3. Add your HuggingFace token to the `.env` file to access Gemma 3 models:
-```
-HUGGINGFACE_TOKEN="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"
-```
-
-4. Download and place the MIMIC-IV-BHC dataset in the `data/` directory:
-```
-data/mimic-iv-bhc.csv
-```
-
-## Usage
-
-### Baseline Evaluation
-
-Run the baseline evaluation to establish performance metrics for both models:
+Activate the environment:
 
 ```bash
-python baseline.py --sample_size 100
+source venv/bin/activate
 ```
 
-Optional arguments:
-- `--output_dir`: Output directory for results (default: `./results/baseline`)
-- `--dataset_path`: Path to the dataset (default: `./data/mimic-iv-bhc.csv`)
-- `--sample_size`: Number of examples to evaluate (default: 100)
-- `--batch_size`: Batch size for evaluation (default: 4)
-- `--max_tokens`: Maximum new tokens to generate (default: 512)
-- `--seed`: Random seed (default: 42)
-- `--bert_score_model`: Model type for BERTScore evaluation (default: `allenai/longformer-base-4096`)
+Add your Hugging Face credentials to the newly generated `.env` file:
 
-### Hyperparameter Optimization
+```dotenv
+HUGGINGFACE_READ_TOKEN="hf_..."
+HUGGINGFACE_WRITE_TOKEN="hf_..."
+```
 
-Run hyperparameter search to find optimal configurations for fine-tuning:
+Finally, download the dataset and place it at `data/mimic-iv-bhc.csv`.
+
+## End‑to‑End Workflow
+
+The canonical experimental sequence is outlined below.  Each step is fully automated yet customisable via command‑line arguments.
+
+### Step 1  Baseline evaluation
+
+Generate naïve summaries and compute ROUGE and BERTScore values:
 
 ```bash
-python hyperparameter_search.py --n_trials 10
+python baseline.py --sample_size 100 --batch_size 4
 ```
 
-Optional arguments:
-- `--method`: Optimization method (default: `random`)
-- `--n_trials`: Number of trials (default: 10)
-- `--output_dir`: Output directory (default: `./results/hyperparameter`)
-- `--dataset_path`: Path to the dataset (default: `./data/mimic-iv-bhc.csv`)
-- `--max_steps`: Maximum training steps per trial (default: 300)
-- `--sample_size`: Number of examples to use (default: 1000)
-- `--seed`: Random seed (default: 42)
+The `--sample_size` argument (default 1000) controls the number of discharge notes evaluated, whereas `--batch_size` (default 4) sets the generation batch size.  Results are stored under `./results/baseline/`.
+
+### Step 2  Hyper‑parameter optimisation
+
+Invoke Optuna‑based Bayesian search (or fallback random search) to identify optimal LoRA/QLoRA settings:
+
+```bash
+python hyperparameter_search_test_sum.py \
+       --model_name "gemma-3-12b-it" \
+       --n_trials 15 \
+       --method "bayesian" \
+       --sample_size 500 \
+       --max_steps 200
+```
+
+Comprehensive logs and the highest‑scoring adapter checkpoint are written to `./results/hyperparameter/`.
+
+### Step 3  Final model training
+
+Train the chosen architecture on the full dataset (or an expanded subsample) using the best hyper‑parameters:
+
+```bash
+python train.py \
+       --model_name "gemma-3-12b-it" \
+       --dataset_path "./data/mimic-iv-bhc.csv" \
+       --lora_rank 16 \
+       --lora_alpha 32 \
+       --lora_dropout 0.1 \
+       --learning_rate 5e-5 \
+       --batch_size 1 \
+       --warmup_ratio 0.05 \
+       --num_train_epochs 3 \
+       --num_summaries 100
+```
+
+The resulting adapter is deposited in `./results/final_models/<model_name>/`, accompanied by generated summaries for subsequent evaluation.
+
+### Step 4  In‑depth evaluation
+
+Compute BLEU, METEOR, and domain‑specific BERTScore values for a JSON file of generated summaries:
+
+```bash
+python evaluate_bertscore.py \
+       "./results/final_models/gemma-3-12b-it/generated_summaries_....json" \
+       --model_type "Simonlee711/Clinical-Longformer" \
+       --output_dir "./results/evaluation"
+```
+
+Aggregated and per‑instance statistics are written to the designated directory.
+
+### Step 5  Visualise and compare results
+
+Merge the CSV files created in Step 4 into a unified suite of comparative plots:
+
+```bash
+python plot_results.py \
+       --results_dir "./results/evaluation" \
+       --output_dir "./results/plots"
+```
+
+### Step 6  Upload to the Hugging Face Hub
+
+Disseminate the lightweight adapter so that other investigators can reproduce or extend your work:
+
+```bash
+python upload.py \
+       --model_name "gemma-3-12b-it" \
+       --local_adapter_path "./results/final_models/gemma-3-12b-it/final_adapter/" \
+       --hub_repo_id "YourUsername/gemma-3-12b-it-mimic-bhc-summarization"
+```
+
+Only the adapter weights and tokenizer configuration are transferred, keeping storage overhead minimal.
 
 ## Project Structure
 
 ```
 medical-text-summarization/
-├── data/                # Dataset directory
-├── models/              # Model checkpoints and fine-tuned models
-├── results/             # Evaluation results and visualizations
-│   ├── baseline/        # Baseline evaluation results
-│   └── hyperparameter/  # Hyperparameter search results
-├── logs/                # Log files
-├── baseline.py          # Baseline evaluation script
-├── hyperparameter_search.py  # Hyperparameter search script
-├── requirements.txt     # Python dependencies
-├── setup.sh             # Environment setup script
-└── README.md            # Project documentation
+├── data/                    # Dataset directory (e.g., mimic-iv-bhc.csv)
+├── logs/                    # Log files for baseline and hyperparameter search
+├── results/                 # Evaluation results, plots, and models
+│   ├── baseline/            # Baseline evaluation metrics and summaries
+│   ├── hyperparameter/      # Hyperparameter search results and best models
+│   ├── final_models/        # Final trained model adapters and summaries
+│   ├── evaluation/          # Detailed evaluation scores (ROUGE, BERTScore, etc.)
+│   └── plots/               # Final comparison plots
+├── .env                     # Environment variables (incl. HF tokens)
+├── baseline.py              # Baseline evaluation script
+├── hyperparameter_search_test_sum.py
+├── train.py                 # Final model training script
+├── evaluate_bertscore.py    # In‑depth evaluation script
+├── plot_results.py          # Visualisation script
+├── upload.py                # Hub upload script
+├── requirements.txt         # Python dependencies
+├── setup.sh                 # Environment setup script
+└── README.md                # Project documentation
 ```
 
 ## Evaluation Metrics
 
-The following metrics are used to evaluate model performance:
-
-- **ROUGE-1**: Unigram overlap between generated and reference summaries
-- **ROUGE-2**: Bigram overlap between generated and reference summaries
-- **ROUGE-L**: Longest common subsequence between generated and reference summaries
-- **BERTScore**: Semantic similarity using contextual embeddings
-
-## QLoRA and LoRA Configuration
-
-We use Quantized Low-Rank Adaptation (QLoRA) for memory-efficient fine-tuning of Gemma 3-12B-IT and LoRA for BART-Large-CNN. The key hyperparameters optimized include:
-
-- **LoRA rank (r)**: Number of low-rank factors (4-64)
-- **LoRA alpha**: Scaling factor for weight updates (typically rank * 2)
-- **LoRA dropout**: Dropout rate to prevent overfitting (0.05-0.3)
-- **Learning rate**: Rate of parameter updates (1e-5 to 5e-4)
-- **Batch size**: Number of samples processed per step (1, 2, or 4)
-- **Warmup ratio**: Portion of training used for learning rate warmup (0.03-0.1)
-
-## Results
-
-After running the baseline evaluation and hyperparameter search, results will be saved in the `results/` directory, including:
-
-- CSV files with summary metrics
-- JSON files with detailed results
-- Visualizations comparing model performance
-- Example summaries for qualitative analysis
+Performance is appraised using four complementary criteria.  ROUGE‑1, ROUGE‑2, and ROUGE‑L quantify lexical overlap at the unigram, bigram, and longest‑common‑subsequence levels, respectively.  BERTScore gauges semantic congruence by exploiting contextual embeddings derived from a domain‑specific transformer.  BLEU, a precision‑oriented machine‑translation measure, assesses n‑gram concurrence, whereas METEOR incorporates stemming, synonym matching, and word‑order penalties to yield a more holistic reflection of quality.
 
 ## Dependencies
 
-Key dependencies include:
+All software prerequisites are declared in `requirements.txt`.  Principal libraries include **PyTorch**, **Transformers**, **PEFT**, **TRL**, and **BitsAndBytes** for model training; **Evaluate**, **ROUGE**, **BERTScore**, and **NLTK** for metric computation; **Optuna** for Bayesian optimisation; and **Pandas**, **Matplotlib**, and **Seaborn** for statistical analysis and visualisation.
 
-- PyTorch 2.5.0+
-- Transformers 4.50.0+
-- PEFT 0.13.0+
-- BitsAndBytes 0.44.0+
-- TRL 0.11.0+
-- Evaluate 0.4.1+
-- ROUGE and BERTScore for evaluation
+## Acknowledgements
 
-See `requirements.txt` for the complete list.
-
-## Acknowledgments
-
-This project uses the MIMIC-IV-BHC dataset, derived from the MIMIC-IV clinical database maintained by the MIT Laboratory for Computational Physiology.
+The work rests upon data derived from the *Medical Information Mart for Intensive Care IV* (MIMIC‑IV) database, curated by the MIT Laboratory for Computational Physiology.  All models trained with these data must preserve patient anonymity in accordance with the MIMIC‑IV data‑use agreement.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is distributed under the terms of the MIT License.  Please consult the `LICENSE` file for the full text.
 
-## Citation
-
-If you use this code in your research, please cite:
-
-```
-@article{mimic-iv-bhc,
-  title={A Dataset and Benchmark for Hospital Course Summarization with Adapted Large Language Models},
-  author={Aali, A. and Van Veen, D. and Arefeen, Y. and others},
-  journal={arXiv preprint arXiv:2403.05720},
-  year={2024}
-}
-```
