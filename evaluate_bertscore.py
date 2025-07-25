@@ -71,7 +71,8 @@ def save_results(results_data: dict, output_dir: str, model_name: str):
 def evaluate_summaries(file_path: str, model_type: str, output_dir: str):
     print(f"Loading summaries from: {file_path}")
     try:
-        with open(file_path, 'r') as f:
+        # Correctly specify UTF-8 encoding when opening the file
+        with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
     except FileNotFoundError:
         print(f"Error: The file '{file_path}' was not found.")

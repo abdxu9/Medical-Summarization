@@ -39,6 +39,11 @@ print("Successfully logged in to Hugging Face Hub with write permissions.")
 def get_model_config(model_name: str) -> dict:
     """Returns the static configuration for a given model name."""
     configs = {
+        "medgemma": {
+            "model_type": "decoder",
+            "model_path": "google/medgemma-27b-text-it",
+            "use_quantization": True,
+        },
         "gemma-3-12b-it": {
             "model_type": "decoder",
             "model_path": "google/gemma-3-12b-it",
@@ -133,7 +138,7 @@ def main():
         "--model_name",
         type=str,
         required=True,
-        choices=["gemma-3-12b-it", "led-base"],
+        choices=["medgemma", "gemma-3-12b-it", "led-base"],
         help="The name of the model architecture you are uploading.",
     )
     parser.add_argument(

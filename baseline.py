@@ -124,44 +124,51 @@ Summary:"""
         """Define model configurations for the requested models"""
         return [
             ModelConfig(
-                name="gemma-3-12b-it",
+                name="medgemma-27b-text-it",
                 model_type="decoder",
-                model_path="google/gemma-3-12b-it",
-                max_length=4096  # Gemma 3 supports up to 128K tokens, but we limit for efficiency
-            ),
-            ModelConfig(
-                name="bart-large-cnn",
-                model_type="encoder-decoder",
-                model_path="facebook/bart-large-cnn",
-                max_length=1024
-            ),
-            ModelConfig(
-                name="openbiollm-8b",
-                model_type="decoder",
-                model_path="aaditya/Llama3-OpenBioLLM-8B",
-                use_quantization=True
-            ),
-            ModelConfig(
-                name="long-t5",
-                model_type="encoder-decoder",
-                model_path="google/long-t5-tglobal-base",
-                max_length=4096,
-                use_quantization=False
-            ),
-            ModelConfig(
-                name="led-base",
-                model_type="encoder-decoder",
-                model_path="allenai/led-base-16384",
-                max_length=4096,
-                use_quantization=False
-            ),
-            ModelConfig(
-                name="phi-3-medium-4k",
-                model_type="decoder",
-                model_path="microsoft/Phi-3-medium-4k-instruct",
+                model_path="google/medgemma-27b-text-it",
                 max_length=4096,
                 use_quantization=True
-            )
+            ),
+            #ModelConfig(
+            #    name="gemma-3-12b-it",
+            #    model_type="decoder",
+            #    model_path="google/gemma-3-12b-it",
+            #    max_length=4096  # Gemma 3 supports up to 128K tokens, but we limit for efficiency
+            #),
+            #ModelConfig(
+            #    name="bart-large-cnn",
+            #    model_type="encoder-decoder",
+            #    model_path="facebook/bart-large-cnn",
+            #    max_length=1024
+            #),
+            #ModelConfig(
+            #    name="openbiollm-8b",
+            #    model_type="decoder",
+            #    model_path="aaditya/Llama3-OpenBioLLM-8B",
+            #    use_quantization=True
+            #),
+            #ModelConfig(
+            #    name="long-t5",
+            #    model_type="encoder-decoder",
+            #    model_path="google/long-t5-tglobal-base",
+            #    max_length=4096,
+            #    use_quantization=False
+            #),
+            #ModelConfig(
+            #    name="led-base",
+            #    model_type="encoder-decoder",
+            #    model_path="allenai/led-base-16384",
+            #    max_length=4096,
+            #    use_quantization=False
+            #),
+            #ModelConfig(
+            #    name="phi-3-medium-4k",
+            #    model_type="decoder",
+            #    model_path="microsoft/Phi-3-medium-4k-instruct",
+            #    max_length=4096,
+            #    use_quantization=True
+            #)
         ]
 
     def load_dataset(self) -> Dataset:
@@ -217,8 +224,15 @@ Summary:"""
         try:
             if model_config.model_type == "decoder":
                 if "gemma-3" in model_config.model_path.lower():
-                    # Special handling for Gemma 3 models
                     model = Gemma3ForConditionalGeneration.from_pretrained(
+                        model_config.model_path,
+                        quantization_config=bnb_config,
+                        device_map="auto",
+                        torch_dtype=torch.bfloat16,
+                        trust_remote_code=True
+                    )
+                elif "medgemma" in model_config.model_path.lower():
+                    model = AutoModelForCausalLM.from_pretrained(
                         model_config.model_path,
                         quantization_config=bnb_config,
                         device_map="auto",
